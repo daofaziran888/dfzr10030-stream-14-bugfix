@@ -64,12 +64,17 @@ class TestWindowMetricPipeline:
 class TestRuleRouterPipeline:
     def test_rules_fired(self):
         r = run_rule_router_pipeline()
-        assert r["rules_fired"] == 4
+        assert r["rules_fired"] == 5
         assert r["total_hits"] >= 0
 
     def test_routing_generated(self):
         r = run_rule_router_pipeline()
         assert len(r["routing"]) > 0
+        # 缺匹配事件沿用 default 回退约定
+        assert "default" in r["routing"]
+        # 归属清单与待送批次随管道结果一并产出
+        assert len(r["assignments"]) == 5
+        assert r["unroutable_count"] == 1
 
     def test_pipeline_result_written(self):
         run_rule_router_pipeline()

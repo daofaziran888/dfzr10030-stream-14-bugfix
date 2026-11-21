@@ -1,8 +1,9 @@
 """跨模块管道接口：触发执行并查询结果。"""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
+from app.services.event_delivery import reception_detail
 from app.services.pipeline_orchestrator import (
     run_all_pipelines, list_pipeline_results,
     run_source_cdc_pipeline, run_window_metric_pipeline,
@@ -12,6 +13,15 @@ from app.services.pipeline_orchestrator import (
 )
 
 router = APIRouter(prefix="/api/pipeline", tags=["管道编排"])
+
+
+@router.get("/reception")
+def get_reception(
+    target: str | None = Query(default=None, description="按目标管道筛选接收详情"),
+    received_only: bool = Query(default=False, description="只看已接收（已确认交付）的事件"),
+) -> dict:
+    """管道接收详情：可筛出已接收事件，并与无法路由的记录对账。"""
+    return {"ok": True, "detail": reception_detail(target, received_only=received_only)}
 
 
 @router.post("/run-all")

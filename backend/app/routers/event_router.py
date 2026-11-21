@@ -6,8 +6,12 @@ import io
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
-from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
+from app.schemas import ActionPayload, ActionResult, PageResult
+from app.services.event_delivery import (
+    confirm_delivery, list_assignments, list_batches, list_deliveries,
+)
 from app.services.event_router import EventRouterService
 
 router = APIRouter(prefix="/api/event_router", tags=["事件路由"])
@@ -16,6 +20,13 @@ service = EventRouterService()
 
 LIST_FIELDS = ["规则编号", "事件类型", "匹配条件", "目标管道", "优先级", "分区键", "重试上限", "DLQ策略"]
 STATUSES = ["草稿", "路由中", "已停用", "已被拒"]
+
+
+class DeliveryPayload(BaseModel):
+    """投递确认载荷：按触发事件身份确认，重试落盘只产生一份交付。"""
+
+    触发事件ID: str
+    投递结果: str = "成功"
 
 
 def query_filters(request: Request) -> dict[str, str]:
@@ -63,6 +74,46 @@ def export_entries(
     return StreamingResponse(
         iter([output.getvalue()]), media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="event_router.csv"'})
+
+
+@router.get("/assignments")
+def get_assignments(
+    target: str | None = Query(default=None, description="按归属目标管道筛选"),
+    ambiguous: bool | None = Query(default=None, description="只看优先级仍无法区分的歧义候选"),
+    routed: bool | None = Query(default=None, description="是否匹配到路由；false 即无法路由记录"),
+) -> dict:
+    """触发事件分区归属清单：路由查询入口，按目标排序。"""
+    return {"ok": True, "items": list_assignments(target, ambiguous=ambiguous, routed=routed)}
+
+
+@router.get("/batches")
+def get_batches(
+    target: str | None = Query(default=None, description="按目标管道筛选"),
+    status: str | None = Query(default=None, description="待送/已确认"),
+) -> dict:
+    """目标批次回查：已确认批次按原去向保留可查。"""
+    return {"ok": True, "items": list_batches(target, status)}
+
+
+@router.get("/deliveries")
+def get_deliveries(target: str | None = Query(default=None)) -> dict:
+    """路由确认清单：投递结果按目标排序回查。"""
+    return {"ok": True, "items": list_deliveries(target)}
+
+
+@router.post("/deliveries/confirm", response_model=ActionResult)
+def post_delivery_confirm(payload: DeliveryPayload) -> ActionResult:
+    """确认一次投递并回写确认清单；并发/重试提交同一触发事件只确认一次。"""
+    event_id = payload.触发事件ID.strip()
+    if not event_id:
+        return ActionResult(ok=False, message="缺少触发事件ID，无法确认交付")
+    record = confirm_delivery(event_id, payload.投递结果.strip() or "成功")
+    repeated = int(record.get("重复提交", 0))
+    message = (
+        f"触发事件 {event_id} 已确认交付（第 {repeated + 1} 次提交，仍只保留一份交付）"
+        if repeated else f"触发事件 {event_id} 已确认交付"
+    )
+    return ActionResult(ok=True, message=message, entry=record)
 
 
 @router.get("/{entry_id}", response_model=dict)

@@ -28,6 +28,52 @@
         <button v-for="action in actions" :key="action" class="btn" :data-testid="`action-${selectedNode.id}-${action}`" @click="runAction(action, selectedNode)">{{ action }}</button>
       </div>
     </div>
+    <section class="reception-panel" data-testid="reception-panel">
+      <header class="panel-head">
+        <div>
+          <h3>管道接收详情</h3>
+          <p class="page-desc">按触发事件分区归属清单接收明细，已接收事件可筛选，并与无法路由记录对账。</p>
+        </div>
+        <div class="page-actions">
+          <label class="filter-item">
+            <span>目标管道</span>
+            <input v-model="receptionTarget" data-testid="reception-target" placeholder="按目标筛选" />
+          </label>
+          <label class="filter-item">
+            <input v-model="receivedOnly" type="checkbox" data-testid="reception-received-only" @change="loadReception" />
+            <span>只看已接收</span>
+          </label>
+          <button class="btn primary" type="button" data-testid="refresh-reception" @click="loadReception">刷新接收详情</button>
+        </div>
+      </header>
+      <div class="stat-row" v-if="reception">
+        <article class="stat-card"><span class="stat-label">归属事件总数</span><strong>{{ reception.summary['归属事件总数'] }}</strong></article>
+        <article class="stat-card"><span class="stat-label">已接收事件数</span><strong>{{ reception.summary['已接收事件数'] }}</strong></article>
+        <article class="stat-card"><span class="stat-label">无法路由事件数</span><strong>{{ reception.summary['无法路由事件数'] }}</strong></article>
+        <article class="stat-card"><span class="stat-label">歧义候选事件数</span><strong>{{ reception.summary['歧义候选事件数'] }}</strong></article>
+        <article class="stat-card"><span class="stat-label">归属冲突事件数</span><strong>{{ reception.summary['归属冲突事件数'] }}</strong></article>
+      </div>
+      <table class="data-table" v-if="reception">
+        <thead>
+          <tr><th>触发事件ID</th><th>触发规则</th><th>目标管道</th><th>批次编号</th><th>投递结果</th><th>确认时间</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="d in reception.received" :key="receivedKey(d)" :data-testid="receivedTestId(d)">
+            <td>{{ d['触发事件ID'] }}</td><td>{{ d['规则编号'] ?? '—' }}</td><td>{{ d['目标管道'] }}</td>
+            <td>{{ d['批次编号'] ?? '—' }}</td><td>{{ d['投递结果'] }}</td><td>{{ d['确认时间'] }}</td>
+          </tr>
+          <template v-if="!receivedOnly">
+            <tr v-for="u in reception.unroutable" :key="unroutableKey(u)" :data-testid="unroutableTestId(u)" class="unroutable-row">
+              <td>{{ u['触发事件ID'] }}</td><td>{{ u['规则编号'] }}</td><td>{{ u['归属目标'] }}（回退）</td>
+              <td>—</td><td>无法路由</td><td>{{ u['触发时间'] ?? '—' }}</td>
+            </tr>
+          </template>
+          <tr v-if="!reception.received.length && (receivedOnly || !reception.unroutable.length)">
+            <td colspan="6" class="empty-state">暂无接收明细</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
     <div v-if="showCreate" class="modal-backdrop" data-testid="create-modal">
       <form class="modal" @submit.prevent="submitCreate"><h3>登记管道DAG</h3>
         <label v-for="field in columns.slice(0,3)" :key="field" class="create-field"><span>{{ field }}</span><input v-model="createValues[field]" :placeholder="`请输入${field}`" required /></label>
@@ -78,5 +124,52 @@ async function submitCreate() {
   try { const res = await request(ENDPOINT, { method: 'POST', body: JSON.stringify({ values: createValues.value }) }); if(!res.ok) throw new Error('创建失败'); showCreate.value = false; await reload() } catch(e: any) { errorMessage.value = e.message }
 }
 function exportRows() { window.open(`${ENDPOINT}/export`, '_blank') }
-onMounted(reload)
+
+// 管道接收详情：来自跨模块管道接口的对账数据
+type ReceivedRow = Record<string, string | null>
+type ReceptionDetail = {
+  目标管道: string
+  received: ReceivedRow[]
+  unroutable: Array<Record<string, unknown>>
+  summary: Record<string, number | boolean>
+}
+const receptionTarget = ref('')
+const receivedOnly = ref(false)
+const reception = ref<ReceptionDetail | null>(null)
+const receivedKey = (d: ReceivedRow) => `r-${String(d['触发事件ID'])}`
+const receivedTestId = (d: ReceivedRow) => `received-row-${String(d['触发事件ID'])}`
+const unroutableKey = (u: Record<string, unknown>) => `u-${String(u['触发事件ID'])}`
+const unroutableTestId = (u: Record<string, unknown>) => `unroutable-row-${String(u['触发事件ID'])}`
+async function loadReception() {
+  try {
+    const params = new URLSearchParams()
+    if (receptionTarget.value.trim()) params.set('target', receptionTarget.value.trim())
+    params.set('received_only', String(receivedOnly.value))
+    const res = await request(`/api/pipeline/reception?${params.toString()}`)
+    if (!res.ok) throw new Error('接收详情读取失败')
+    const data = await res.json()
+    reception.value = data.detail
+  } catch (e) { errorMessage.value = e instanceof Error ? e.message : '接收详情读取失败' }
+}
+onMounted(() => { void reload(); void loadReception() })
 </script>
+
+<style scoped>
+.reception-panel {
+  margin-top: 20px;
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.panel-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.panel-head h3 { margin: 0; }
+.unroutable-row { background: #eef2ff; }
+</style>

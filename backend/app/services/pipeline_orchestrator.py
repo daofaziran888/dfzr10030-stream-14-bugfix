@@ -12,8 +12,9 @@ from typing import Any
 from app.fixtures import (
     SOURCE_EVENTS, TRANSFORM_RECORDS, WINDOW_CONFIGS,
     RULE_TRIGGERS, METRIC_DEFS, QUALITY_SAMPLES,
-    PARTITION_STATS, EVENT_ROUTES,
+    PARTITION_STATS,
 )
+from app.services import event_delivery
 from app.store import store
 
 
@@ -105,21 +106,47 @@ def run_window_metric_pipeline(window_id: str | None = None) -> dict:
 
 # Pipeline 3: rule_engine -> event_router -> pipeline_orch
 def run_rule_router_pipeline() -> dict:
-    """规则引擎触发后的事件路由。"""
+    """规则引擎触发后的事件路由。
+
+    触发规则与路由规则按明确业务关系（EVENT_ROUTES.触发规则）关联：
+    候选目标的优先级参与归属判定，结果与候选配置顺序无关；缺匹配事件回退
+    default 管道；归属清单落盘后按目标写入待送批次，供管道编排接收明细。
+    """
     triggers = list(RULE_TRIGGERS)
-    routes = {r["规则编号"]: r.get("目标管道", "default") for r in EVENT_ROUTES}
+    # 重算触发事件分区归属清单（含优先级裁决、歧义标记、缺匹配回退）
+    assignments = event_delivery.recompute_assignments()
+    batches = event_delivery.enqueue_pending(assignments=assignments)
+
+    # 保留既有 routing 口径：按归属目标聚合，且目标分组稳定排序
     routing: dict[str, list] = {}
     total_hits = 0
-    for t in triggers:
-        rid = t["规则编号"]
-        route = routes.get(rid, "default")
-        if route not in routing:
-            routing[route] = []
-        hits = len(t.get("命中用户", []))
+    for assignment in assignments:
+        route = assignment["归属目标"]
+        routing.setdefault(route, [])
+        trigger = next((t for t in triggers if t["触发事件ID"] == assignment["触发事件ID"]), None)
+        hits = len(trigger.get("命中用户", [])) if trigger else 0
         total_hits += hits
-        routing[route].append({"规则": rid, "动作": t["动作"], "命中": hits})
+        routing[route].append({
+            "触发事件ID": assignment["触发事件ID"],
+            "规则": assignment["规则编号"],
+            "动作": trigger.get("动作") if trigger else None,
+            "命中": hits,
+            "ambiguous": assignment["ambiguous"],
+            "routed": assignment["routed"],
+        })
+    routing = {key: routing[key] for key in sorted(routing)}
 
-    result = {"rules_fired": len(triggers), "total_hits": total_hits, "routing": routing}
+    result = {
+        "rules_fired": len(triggers),
+        "total_hits": total_hits,
+        "routing": routing,
+        # 新增的可对账结构
+        "assignments": assignments,
+        "batches": batches,
+        "ambiguous_count": sum(1 for a in assignments if a["ambiguous"]),
+        "unroutable_count": sum(1 for a in assignments if not a["routed"]),
+        "conflict_count": sum(1 for a in assignments if a["归属冲突"]),
+    }
     _wr("rule_router_orch", {"source": ["rule_engine", "event_router"], "target": "pipeline_orch", "payload": result})
     return result
 
